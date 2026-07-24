@@ -17,13 +17,19 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 ```
 
-Linux 需要提供 CBLAS 和 LAPACK，例如 Debian/Ubuntu：
+Linux 需要提供 CBLAS 和 LAPACK：
 
 ```sh
 sudo apt install cmake g++ libopenblas-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+如果希望直接输出对比结果： 
+```sh 
+./build/delayed_lu/delayed_lu_example 
+./build/delayed-bunch-kaufman/delayed_sytrf_example 
 ```
 
 ## 目录结构
