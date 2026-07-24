@@ -23,6 +23,7 @@
 
 namespace {
 
+// 两个延迟实现都使用同一接口，因此可以通过函数指针共用计时与验证代码。
 using DelayedGetrf = void (*)(int, int, double *, int, int *, int *, int &);
 
 struct Result {
@@ -46,9 +47,9 @@ double blas_reconstruction_error(const std::vector<double> &original,
                                  const std::vector<int> *jpiv,
                                  const int eliminated,
                                  const bool delayed_factorization) {
-  // Lbar*Ubar can omit every identically zero Ubar row and its corresponding
-  // Lbar column.  This is an exact compression of the inner dimension, not a
-  // sparse approximation.  The actual matrix product is still done by dgemm.
+  // Lbar*Ubar 可以删去 Ubar 中恒为零的行及 Lbar 中对应的列。
+  // 这只是对乘法内维度的精确压缩，并不是稀疏近似；真正的矩阵乘法仍由
+  // BLAS dgemm 完成。
   std::vector<int> product_rows;
   for (int k = 0; k < n; ++k) {
     const int first_col =
@@ -72,7 +73,7 @@ double blas_reconstruction_error(const std::vector<double> &original,
   for (int compressed_k = 0; compressed_k < inner; ++compressed_k) {
     const int factor_k = product_rows[compressed_k];
 
-    // For delayed rows, Lbar contains the identity block below INFO.
+    // 对延迟行，Lbar 在 info 以下包含一个单位块。
     left[index(factor_k, compressed_k, n)] = 1.0;
     if (!delayed_factorization || factor_k < eliminated) {
       for (int row = factor_k + 1; row < n; ++row) {
@@ -81,7 +82,7 @@ double blas_reconstruction_error(const std::vector<double> &original,
       }
     }
 
-    // Rows above INFO contain U; rows below INFO contain the Schur block S.
+    // info 以上的行保存 U，info 以下的右下角区域保存 Schur 补 S。
     const int first_col = delayed_factorization && factor_k >= eliminated
                               ? eliminated
                               : factor_k;
@@ -178,31 +179,24 @@ Result run_lapack(const std::vector<double> &original, const int n,
           max_error <= tolerance};
 }
 
-void print_delayed_result(const Result &result, const int n) {
+void print_result(const Result &result, const int n,
+                  const bool delayed_semantics) {
   std::cout << "\n[" << result.name << "]\n";
-  std::cout << "factorization time: " << result.factor_seconds << " s\n";
-  std::cout << "verification time: " << result.verification_seconds << " s\n";
-  std::cout << "first delayed position (0-based): " << result.info << '\n';
-  std::cout << "delayed pivot count: " << n - result.info << '\n';
-  std::cout << "verification P^T*Lbar*Ubar*Q^T == A: "
-            << (result.verified ? "PASS" : "FAIL") << '\n';
-  std::cout << "max absolute error: " << result.max_error << '\n';
-}
-
-void print_lapack_result(const Result &result, const int n) {
-  std::cout << "\n[" << result.name << "]\n";
-  std::cout << "factorization time: " << result.factor_seconds << " s\n";
-  std::cout << "verification time: " << result.verification_seconds << " s\n";
-  if (result.info == n) {
-    std::cout << "first zero U diagonal (0-based): none\n";
+  std::cout << "分解耗时：" << result.factor_seconds << " 秒\n";
+  std::cout << "验证耗时：" << result.verification_seconds << " 秒\n";
+  if (delayed_semantics) {
+    std::cout << "延迟起点（0-based）：" << result.info << '\n';
+    std::cout << "延迟主元数：" << n - result.info << '\n';
+  } else if (result.info == n) {
+    std::cout << "首个为零的 U 对角元位置：无\n";
   } else {
-    std::cout << "first zero U diagonal (0-based): " << result.info << '\n';
+    std::cout << "首个为零的 U 对角元位置（0-based）：" << result.info
+              << '\n';
+    std::cout << "说明：LAPACK 会继续分解，该位置不表示延迟后缀\n";
   }
-  std::cout << "note: LAPACK continues after a singular pivot; this is not a "
-               "delayed suffix\n";
-  std::cout << "verification P^T*L*U == A: "
-            << (result.verified ? "PASS" : "FAIL") << '\n';
-  std::cout << "max absolute error: " << result.max_error << '\n';
+  std::cout << "BLAS 重建验证："
+            << (result.verified ? "通过" : "失败") << '\n';
+  std::cout << "最大绝对误差：" << result.max_error << '\n';
 }
 
 } // namespace
@@ -215,6 +209,9 @@ int main() {
       static_cast<std::size_t>(lda) * static_cast<std::size_t>(n);
 
   try {
+    // 三个实现共用这一份原始矩阵。前两列全零，位置 2 至 801 的对角元
+    // 非零，其余位置为零。两个延迟算法会把非零列换到前面并消去 800
+    // 个主元，然后从位置 800 开始延迟。
     std::vector<double> original(matrix_elements, 0.0);
     for (int k = 0; k < nonzeros; ++k) {
       const int position = k + 2;
@@ -226,31 +223,38 @@ int main() {
         100.0 * std::numeric_limits<double>::epsilon() * nonzeros;
 
     std::cout << std::fixed << std::setprecision(6);
-    std::cout << "matrix size: " << n << " x " << n << '\n';
-    std::cout << "nonzero entries / numerical rank: " << nonzeros << '\n';
+    std::cout << "矩阵大小：" << n << " x " << n << '\n';
+    std::cout << "非零元数/数值秩：" << nonzeros << '\n';
 
     const Result complete =
-        run_delayed("global-maximum fallback", delayed_getrf, original, n,
-                    lda, tolerance);
-    print_delayed_result(complete, n);
+        run_delayed("全主元回退的延迟 LU", delayed_getrf, original, n, lda,
+                    tolerance);
+    print_result(complete, n, true);
 
     const Result column =
-        run_delayed("first-nonzero-column fallback", delayed_getrf_column,
-                    original, n, lda, tolerance);
-    print_delayed_result(column, n);
+        run_delayed("非零列回退的延迟 LU", delayed_getrf_column, original, n,
+                    lda, tolerance);
+    print_result(column, n, true);
 
     const Result lapack = run_lapack(original, n, lda, tolerance);
-    print_lapack_result(lapack, n);
+    print_result(lapack, n, false);
+
+    if (column.factor_seconds > 0.0) {
+      std::cout << "\n全主元回退/非零列回退分解耗时比："
+                << complete.factor_seconds / column.factor_seconds << '\n';
+    }
+    if (lapack.factor_seconds > 0.0) {
+      std::cout << "非零列回退/LAPACK 分解耗时比："
+                << column.factor_seconds / lapack.factor_seconds << '\n';
+    }
 
     const bool passed = complete.verified && column.verified &&
                         lapack.verified && complete.info == nonzeros &&
                         column.info == nonzeros && lapack.info == 0;
-    std::cout << "\ncomparison result: " << (passed ? "PASS" : "FAIL")
-              << '\n';
+    std::cout << "\n总体比较结果：" << (passed ? "通过" : "失败") << '\n';
     return passed ? 0 : 2;
   } catch (const std::bad_alloc &) {
-    std::cerr << "not enough heap memory: BLAS reconstruction needs about "
-                 "385 MiB for this rank-8 4096x4096 example\n";
+    std::cerr << "堆内存不足，无法完成 4096x4096 算例\n";
     return 3;
   }
 }
