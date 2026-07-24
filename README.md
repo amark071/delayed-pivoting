@@ -1,4 +1,4 @@
-# Delayed Pivoting
+# 延迟主元分解
 
 这个仓库统一保存两个使用 C++17、BLAS 和 LAPACK 实现的延迟主元稠密分解：
 
@@ -39,7 +39,7 @@ delayed-pivoting/
     ├── delayed_sytrf.cpp
     ├── delayed_sytrf_blocked.cpp
     ├── lapack_dsytrf.cpp
-    └── *_example.cpp
+    └── example.cpp
 ```
 
 矩阵统一采用列主序，公开下标和置换记录统一采用 0-based。具体接口、延迟区间语义、紧凑因子存储和验证方式见两个子目录中的 `README.md`。

@@ -22,18 +22,8 @@ else()
   target_link_libraries(delayed_bunch_kaufman PUBLIC BLAS::BLAS LAPACK::LAPACK)
 endif()
 
-add_executable(delayed_sytrf_example symmetric_example.cpp)
+add_executable(delayed_sytrf_example example.cpp)
 target_link_libraries(delayed_sytrf_example PRIVATE delayed_bunch_kaufman)
-
-add_executable(delayed_sytrf_comparison comparison_example.cpp)
-target_link_libraries(delayed_sytrf_comparison PRIVATE delayed_bunch_kaufman)
-
-add_executable(delayed_sytrf_blocked_comparison blocked_comparison_example.cpp)
-target_link_libraries(delayed_sytrf_blocked_comparison
-  PRIVATE delayed_bunch_kaufman)
 
 enable_testing()
 add_test(NAME delayed_sytrf_example COMMAND delayed_sytrf_example)
-add_test(NAME delayed_sytrf_comparison COMMAND delayed_sytrf_comparison)
-add_test(NAME delayed_sytrf_blocked_comparison
-  COMMAND delayed_sytrf_blocked_comparison 512)

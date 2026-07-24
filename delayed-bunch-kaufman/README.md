@@ -1,15 +1,14 @@
-# Delayed-pivot Bunch--Kaufman
+# 对称不定矩阵的延迟主元 Bunch–Kaufman 分解
 
-C++17 implementation of a delayed-pivot Bunch--Kaufman factorization for
-column-major, real symmetric matrices. Only the lower triangle is read and
-overwritten. Schur-complement updates use the symmetric CBLAS kernels. The
-in-place result satisfies
+这是一个面向列主序实对称稠密矩阵的 C++17 实现。算法只读取并覆盖矩阵的下三角，使用 Bunch–Kaufman 规则选择 1x1 或 2x2 主元，并在两种主元都不能接受时把当前节点移入延迟后缀。分解结果满足
 
 ```text
-P^T * A * P = L * D * L^T.
+P^T * A * P = L * D * L^T
 ```
 
-## Interface
+其中 `P` 由 `perm` 表示，`D` 由 1x1 和 2x2 对角块组成。
+
+## 接口与存储
 
 ```cpp
 void delayed_sytrf(int n, double* A, int lda,
@@ -22,139 +21,108 @@ void lapack_sytrf(int n, double* A, int lda,
                   int* perm, int* piv_size, int& info);
 ```
 
-All exposed indices are zero-based. `A(i,j)` is stored at `A[i+j*lda]`.
-Only entries with `i>=j` must be initialized. The upper triangle is ignored
-and is not synchronized with the lower factor storage.
+全部公开下标均为 0-based。`A(i,j)` 位于 `A[i+j*lda]`，调用者只需要初始化 `i>=j` 的下三角；上三角不会被算法读取，也不会随下三角同步更新。
 
-- `perm[pos]` is the original node now stored at position `pos`.
-- `piv_size[pos] == 1` marks a 1x1 pivot.
-- `piv_size[pos] == 2` marks the beginning of a 2x2 pivot.
-- `piv_size[pos] == 0` marks its second position or a delayed position.
-- `[0,info)` is eliminated and `[info,n)` is delayed.
-- `info == n` means no node was delayed.
-- `info == -1` means dimensions or pointers were invalid.
+- `perm[pos]` 表示分解后位置 `pos` 上的节点来自原矩阵的哪个位置。
+- `piv_size[pos] == 1` 表示当前位置是一个 1x1 主元。
+- `piv_size[pos] == 2` 表示当前位置是一个 2x2 主元的起点。
+- `piv_size[pos] == 0` 表示当前位置是 2x2 主元的第二列，或者属于延迟区域。
+- 对两个延迟算法，`[0,info)` 已被消去，`[info,n)` 是延迟后缀。
+- 对两个延迟算法，`info == n` 表示没有节点被延迟，`info == -1` 表示参数非法。
 
-`delayed_sytrf_blocked` has exactly the same storage and output semantics as
-`delayed_sytrf`. It accumulates mixed 1x1/2x2 pivots in panels of up to 64
-columns. A heap-backed workspace stores `W=L_panel*D_panel`; pivot columns and
-candidate rows are materialized lazily with `dgemv`, and `dsyr2k` applies the
-whole panel update to the lower trailing matrix.
+`delayed_sytrf` 与 `delayed_sytrf_blocked` 的接口、紧凑因子格式以及输出含义完全相同，因此上层程序可以直接替换二者进行比较。
 
-The third function is a C++ wrapper around LAPACK `DSYTRF` with `UPLO='L'`.
-For this wrapper, `info==n` means LAPACK completed without a singular `D`
-block; `info<n` is the first singular position converted to zero-based.
-LAPACK continues after that position, so its `info` does not describe a
-delayed suffix. After factorization, LAPACK `DSYCONV` separates the off-diagonal
-entries of 2x2 `D` blocks and applies the pivot interchanges to the multiplier
-rows. The wrapper then exposes the same explicit `L`, `D`, `perm`, and
-`piv_size` presentation as `delayed_sytrf`.
+`lapack_sytrf` 是 LAPACK `DSYTRF(UPLO='L')` 的 C++ 包装器。对这个包装器，`info == n` 表示 LAPACK 没有报告奇异 `D` 块；`info < n` 表示转换为 0-based 后的首个奇异位置。LAPACK 在该位置之后仍会继续分解，所以这个 `info` 不是延迟后缀的起点。包装器还调用 `DSYCONV`，把 LAPACK 交织存放的置换、乘子和 2x2 块非对角元转换为与两个延迟算法相同的显式 `L`、`D`、`perm` 和 `piv_size` 格式。
 
-The algorithm maintains three contiguous ranges:
+## 延迟节点的处理
+
+分解过程中维护三个连续区间：
 
 ```text
-[0,k)             eliminated
-[k,active_end)    pivot candidates
-[active_end,n)    delayed nodes
+[0,k)             已消去区域
+[k,active_end)    当前仍可选作主元的活动区域
+[active_end,n)    已延迟区域
 ```
 
-When neither a stable 1x1 nor 2x2 pivot can be selected, node `k` is exchanged
-with `active_end-1`, then `active_end` is decremented. A new delayed node is
-therefore inserted immediately before the existing delayed suffix. It is never
-blindly exchanged with `n-1`, which could replace an already delayed node.
+如果位置 `k` 既不能组成稳定的 1x1 主元，也不能组成稳定的 2x2 主元，算法将它与 `active_end-1` 对称交换，然后令 `active_end` 减一。这样，新延迟节点总是插在已有延迟后缀的前面，不会每次都与 `n-1` 交换而破坏之前已经延迟的节点。
 
-## Implementation optimizations
+最终的右下角 `[info,n)` 仍保存对应的 Schur 补。验证完整分解时，可以把这个未消去部分看作 `D` 的最后一个对称块。
 
-The factorization stores and updates only the lower triangle:
+## 两个延迟实现
 
-- a 1x1 Schur update uses `cblas_dsyr`, replacing a full `dger` update;
-- a 2x2 update uses two `cblas_dsyr` calls and one `cblas_dsyr2` call;
-- 2x2 multipliers are computed in place, without allocating temporary vectors
-  for every pivot;
-- symmetric interchanges move only the lower-stored Schur complement and the
-  already computed `L` rows instead of swapping a complete row and column;
-- row-maximum searches read the symmetric value from the lower triangle.
+### 非分块实现
 
-These changes approximately halve the Schur-update storage traffic and remove
-repeated heap allocations. `delayed_sytrf` remains the simple unblocked
-reference implementation.
+`delayed_sytrf` 是结构直接、便于检查的非分块版本，只存储和更新下三角：
 
-The separate blocked implementation adds:
+- 1x1 主元使用 `cblas_dsyr` 完成对称秩一更新；
+- 2x2 主元使用两次 `cblas_dsyr` 和一次 `cblas_dsyr2` 完成更新；
+- 2x2 乘子直接在原矩阵中计算，不为每个主元重复分配临时向量；
+- 对称交换只移动下三角保存的 Schur 补和已经计算好的 `L` 行；
+- 候选行最大值通过下三角的对称读取获得。
 
-- a 64-column panel that never splits a 2x2 pivot block;
-- a workspace representation of the not-yet-written Schur complement;
-- lazy `dgemv` materialization for each pivot column and candidate row;
-- synchronized interchange of `A`, `perm`, and workspace rows when a node is
-  pivoted or delayed;
-- one lower-triangular BLAS-3 `dsyr2k` update at the end of each panel;
-- Schur updates over delayed nodes as well as active candidates, so the delayed
-  suffix remains a valid contribution block.
+### 分块实现
 
-## Build
+`delayed_sytrf_blocked` 以最多 64 列组成一个面板，并保证面板边界不会拆开 2x2 主元。面板内部尚未写回的 Schur 补由
 
-macOS uses the system Accelerate framework:
+```text
+S = A_stored - L_panel * W_panel^T
+W_panel = L_panel * D_panel
+```
+
+隐式表示。需要当前主元列或候选行时，通过 `dgemv` 按需物化；面板完成后，再用一次下三角 `dsyr2k` 把整个面板的贡献写回尾矩阵。发生主元交换或延迟时，算法同步交换 `A`、`perm` 和工作矩阵中的对应行。
+
+面板更新覆盖活动候选和延迟节点，所以右下角的延迟后缀始终保持为正确的 Schur 补。工作矩阵使用堆内存，并在每个面板结束后清空和复用。
+
+## 统一示例
+
+对称目录只保留一个 `example.cpp`。它建立一份 `4096x4096`、数值秩为 8 的对称不定矩阵：
+
+- 位置 2、3 构成一个 2x2 不定主元；
+- 位置 4 至 9 构成六个 1x1 主元；
+- 其余节点为零，两个延迟算法应在位置 8 开始延迟。
+
+示例把同一份原矩阵分别复制给以下三个实现：
+
+1. 非分块延迟 Bunch–Kaufman；
+2. 分块延迟 Bunch–Kaufman；
+3. LAPACK `DSYTRF` 包装器。
+
+程序分别输出三者的分解耗时、验证耗时、`info` 含义和最大绝对误差。验证过程使用两次 BLAS `dgemm` 计算 `L*D*L^T`，然后与置换后的原矩阵 `P^T*A*P` 比较。分解计时和验证计时彼此独立。
+
+这个低秩算例主要用于同时检查延迟语义、1x1/2x2 紧凑存储和三种实现的基本耗时，不代表一般稠密满秩矩阵上的最终性能排序。
+
+## 编译与运行
+
+macOS 使用系统自带的 Accelerate：
 
 ```sh
-c++ -std=c++17 delayed_sytrf.cpp lapack_dsytrf.cpp symmetric_example.cpp \
+c++ -O3 -DNDEBUG -std=c++17 delayed_sytrf.cpp \
+  delayed_sytrf_blocked.cpp lapack_dsytrf.cpp example.cpp \
   -framework Accelerate -o delayed_sytrf_example
 ./delayed_sytrf_example
-
-c++ -std=c++17 delayed_sytrf.cpp lapack_dsytrf.cpp comparison_example.cpp \
-  -framework Accelerate -o delayed_sytrf_comparison
-./delayed_sytrf_comparison
-
-c++ -O3 -DNDEBUG -std=c++17 delayed_sytrf.cpp delayed_sytrf_blocked.cpp \
-  lapack_dsytrf.cpp blocked_comparison_example.cpp \
-  -framework Accelerate -o delayed_sytrf_blocked_comparison
-./delayed_sytrf_blocked_comparison 2048
 ```
 
-Linux requires a CBLAS implementation, for example OpenBLAS:
+Linux 需要 CBLAS 和 LAPACK，例如 Debian/Ubuntu 可以安装 OpenBLAS：
 
 ```sh
 sudo apt install cmake g++ libopenblas-dev
-c++ -std=c++17 delayed_sytrf.cpp lapack_dsytrf.cpp symmetric_example.cpp \
+c++ -O3 -DNDEBUG -std=c++17 delayed_sytrf.cpp \
+  delayed_sytrf_blocked.cpp lapack_dsytrf.cpp example.cpp \
   -llapack -lopenblas -o delayed_sytrf_example
-
-c++ -std=c++17 delayed_sytrf.cpp lapack_dsytrf.cpp comparison_example.cpp \
-  -llapack -lopenblas -o delayed_sytrf_comparison
-
-c++ -O3 -DNDEBUG -std=c++17 delayed_sytrf.cpp delayed_sytrf_blocked.cpp \
-  lapack_dsytrf.cpp blocked_comparison_example.cpp \
-  -llapack -lopenblas -o delayed_sytrf_blocked_comparison
+./delayed_sytrf_example
 ```
 
-Or use CMake:
+也可以使用 CMake：
 
 ```sh
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`symmetric_example.cpp` validates consecutive delayed nodes, 1x1 and 2x2
-pivots, a 2x2 Schur update, 100 deterministic random symmetric residual checks,
-and a heap-backed 1200x1200 smoke test. All matrices and pivot metadata in the
-example use `std::vector`; BLAS `dgemm` computes the residual products.
+## 大矩阵的内存分配
 
-`comparison_example.cpp` applies the delayed algorithm and LAPACK `DSYTRF` to
-the same heap-backed 4096x4096 rank-8 matrix. It reports factorization time,
-delayed/singular pivot information, BLAS verification time, and maximum
-absolute reconstruction error. The delayed algorithm stops after eight
-pivots, whereas LAPACK reports the first singular block and continues.
-
-`blocked_comparison_example.cpp` first runs 120 deterministic random residual
-tests, a mixed 1x1/2x2 test crossing multiple panels, and a delayed-suffix test
-whose zero nodes occur inside a panel. It then times the unblocked delayed
-algorithm, the blocked delayed algorithm, and LAPACK `DSYTRF` on the same dense
-mixed-pivot matrix. Its optional first command-line argument sets the benchmark
-order; the default is 2048.
-
-## Large matrices
-
-Do not place a large dense matrix in a local `std::array` or C array. A single
-1000x1000 `double` matrix occupies about 8 MB, which is already near the
-default thread-stack limit on many systems. Allocate matrix and metadata on the
-heap instead:
+不要把大型稠密矩阵定义为局部 C 数组或 `std::array`。一个 `1000x1000` 的 `double` 矩阵约占 8 MB，已经接近很多系统的默认线程栈上限。矩阵和主元元数据应使用 `std::vector` 在堆上分配：
 
 ```cpp
 const std::size_t elements =
@@ -166,5 +134,4 @@ std::vector<int> piv_size(static_cast<std::size_t>(n));
 delayed_sytrf(n, A.data(), lda, perm.data(), piv_size.data(), info);
 ```
 
-Converting to `std::size_t` before multiplying also avoids signed `int`
-overflow when calculating the allocation size.
+在乘法前先转换为 `std::size_t`，还可以避免用 `int` 计算分配大小时发生有符号整数溢出。
