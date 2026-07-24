@@ -30,17 +30,7 @@ double symmetric_lower_value(const double *a, const int lda, const int row,
   return row >= col ? a[row + col * lda] : a[col + row * lda];
 }
 
-// 在“只存下三角”的布局中执行对称交换：A <- S^T A S，同时更新 perm。
-// 这等价于同时交换第 x/y 行和第 x/y 列，但不能直接对完整行、完整列各交换一次，因为上三角没有维护。
-// 设 x<y，下三角数据被拆为以下几个区段：
-//
-//   1. 列 0..x-1：交换 A(x,0:x-1) 与 A(y,0:x-1)；
-//   2. x 与 y 之间：交换 A(x+1:y-1,x) 与 A(y,x+1:y-1)；
-//   3. 对角线：交换 A(x,x) 与 A(y,y)；
-//   4. 行 y 以下：交换 A(y+1:n-1,x) 与 A(y+1:n-1,y)。
-//
-// 元素 A(y,x) 在对称行列交换后仍映射到自身，所以刻意不动。三个向量区段
-// 用 dswap 完成，避免逐元素循环。
+// 在“只存下三角”的布局中执行对称交换
 void symmetric_swap_lower(const int n, double *a, const int lda, int x, int y,
                           int *perm) {
   if (x == y) {

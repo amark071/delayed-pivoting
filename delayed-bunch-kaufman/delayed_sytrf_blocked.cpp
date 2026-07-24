@@ -21,17 +21,15 @@ constexpr double kBunchKaufmanAlpha =
 constexpr double kDeterminantTolerance =
     64.0 * std::numeric_limits<double>::epsilon();
 
-// 面板必须至少能容纳一个 2x2 主元。64 与 LAPACK 常见默认块宽一致，
-// 但这里保持为实现内部常量，不改变公开接口。
 constexpr int kBlockSize = 64;
 
+// 对称矩阵只用访问下三角
 double symmetric_lower_value(const double *a, const int lda, const int row,
                              const int col) {
   return row >= col ? a[row + col * lda] : a[col + row * lda];
 }
 
-// 只访问下三角，完成 A <- S^T*A*S 的对称 x/y 交换。
-// 分段原因及步长含义与非分块 delayed_sytrf 中的同名辅助函数相同。
+// 只访问下三角，完成对称 x/y 交换。
 void symmetric_swap_lower(const int n, double *a, const int lda, int x, int y,
                           int *perm) {
   if (x == y) {
@@ -44,12 +42,14 @@ void symmetric_swap_lower(const int n, double *a, const int lda, int x, int y,
   if (x > 0) {
     cblas_dswap(x, a + x, lda, a + y, lda);
   }
+
   const int middle = y - x - 1;
   if (middle > 0) {
     cblas_dswap(middle, a + (x + 1) + x * lda, 1,
                 a + y + (x + 1) * lda, lda);
   }
   std::swap(a[x + x * lda], a[y + y * lda]);
+
   const int tail = n - y - 1;
   if (tail > 0) {
     cblas_dswap(tail, a + (y + 1) + x * lda, 1,
@@ -64,9 +64,9 @@ void symmetric_swap_lower(const int n, double *a, const int lda, int x, int y,
 //     = A_stored - L_panel * W_panel^T,
 //   W_panel = L_panel * D_panel
 //
-// 隐式表示。若交换两个活动节点，不仅要对称交换 A 和 perm，还必须交换
-// L_panel 与 W_panel 中对应的两行。A 中已有的 L 行由
-// symmetric_swap_lower 一并交换；这里额外交换独立工作矩阵 W 的两行。
+// 隐式表示。
+// 若交换两个活动节点，不仅要对称交换 A 和 perm，还必须交换L_panel 与 W_panel 中对应的两行。
+// A 中已有的 L 行由 symmetric_swap_lower 一并交换；这里额外交换独立工作矩阵 W 的两行。
 void swap_active_nodes(const int n, double *a, const int lda, const int x,
                        const int y, int *perm, double *work, const int ldw,
                        const int panel_width) {
@@ -79,14 +79,12 @@ void swap_active_nodes(const int n, double *a, const int lda, const int x,
   }
 }
 
-// 物化当前 Schur 补的第 col 列，从对角元一直计算到第 n-1 行。
+// 更新当前 Schur 补的第 col 列，从对角元一直计算到第 n-1 行。
 //
 // A(col:n-1,col) 是面板开始时的基准值，尚未减去已接受面板列的贡献。
 // dgemv 一次完成：
 //
 //   column <- column - L(col:n-1,:) * W(col,:)^T.
-//
-// W 的一行在列主序工作矩阵中以 ldw 为步长，所以 x 的 incX=ldw。
 void materialize_current_column(const int n, const double *a, const int lda,
                                 const int panel_begin,
                                 const int panel_width, const double *work,
@@ -102,13 +100,12 @@ void materialize_current_column(const int n, const double *a, const int lda,
   }
 }
 
-// 物化活动区间 [active_begin,active_end) 中指定 row 的逻辑对称行。
+// 更新活动区间 [active_begin,active_end) 中指定 row 的逻辑对称行。
 // 基准值通过下三角对称读取；随后一次 dgemv 减去面板累计贡献：
 //
 //   row_values <- row_values - L(active_begin:active_end,:)*W(row,:)^T.
 //
-// Bunch--Kaufman 的候选行最大值必须在当前 Schur 补上计算，不能直接扫描
-// 尚未写回的 A_stored。
+// Bunch--Kaufman 的候选行最大值必须在当前 Schur 补上计算，不能直接扫描尚未写回的 A_stored。
 void materialize_active_row(const double *a, const int lda,
                             const int panel_begin, const int panel_width,
                             const double *work, const int ldw,
@@ -125,6 +122,7 @@ void materialize_active_row(const double *a, const int lda,
   }
 }
 
+// 判断一个2x2的矩阵是否稳定
 bool stable_2x2(const double a, const double b, const double c) {
   const double scale = std::max({std::abs(a), std::abs(b), std::abs(c)});
   if (!(scale > 0.0)) {
@@ -144,12 +142,11 @@ bool stable_2x2(const double a, const double b, const double c) {
 // 将一个完整面板 [begin,end) 的累计贡献一次性写回尾部下三角。
 // 令 W21=L21*D11，则目标更新为：
 //
-//   A22 <- A22 - L21*D11*L21^T = A22 - W21*L21^T.
+//    A22 <- A22 - L21*D11*L21^T = A22 - W21*L21^T.
 //
-// 由于 D11 对称，W21*L21^T 与 L21*W21^T 数学上相同，所以可以利用
-// dsyr2k 只更新下三角：
+// 由于 D11 对称，W21*L21^T 与 L21*W21^T 数学上相同，所以可以利用 dsyr2k 只更新下三角：
 //
-//   A22 <- A22 - 0.5*(W21*L21^T + L21*W21^T).
+//    A22 <- A22 - 0.5*(W21*L21^T + L21*W21^T).
 //
 // 更新范围一直到 n，而不是 active_end；延迟节点虽然不再参与当前主元搜索，
 // 仍必须接收 Schur 补，才能作为正确的 contribution block 继续向上层传递。
@@ -182,7 +179,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
   }
 
   // W 采用 n×kBlockSize 列主序堆存储，避免大矩阵时占用线程栈。
-  // 三个长度 n 的临时向量分别用于当前列、2x2 的第二列和候选行物化。
+  // 三个长度 n 的临时向量分别用于当前列、2x2 的第二列和候选行更新。
   const int ldw = std::max(1, n);
   std::vector<double> work(static_cast<std::size_t>(ldw) * kBlockSize, 0.0);
   std::vector<double> column0(static_cast<std::size_t>(n), 0.0);
@@ -191,12 +188,13 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
 
   int panel_begin = 0;
   int active_end = n;
+
   while (panel_begin < active_end) {
     int k = panel_begin;
     int panel_width = 0;
 
     while (k < active_end && panel_width < kBlockSize) {
-      // 当前列必须先物化；列最大值、对角元以及后续乘子都复用该结果。
+      // 当前列必须先更新；列最大值、对角元以及后续乘子都复用该结果。
       materialize_current_column(n, a, lda, panel_begin, panel_width,
                                  work.data(), ldw, k, column0.data());
 
@@ -255,8 +253,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
       }
 
       if (!use_1x1 && !use_2x2) {
-        // 把当前节点插入延迟后缀前端。W 的对应行必须与 A 同步交换，否则
-        // 下一次惰性物化会把其他节点的累计贡献减到新位置上。
+        // 把当前节点插入延迟后缀前端。W 的对应行必须与 A 同步交换，否则 下一次惰性更新会把其他节点的累计贡献减到新位置上。
         swap_active_nodes(n, a, lda, k, active_end - 1, perm, work.data(),
                           ldw, panel_width);
         --active_end;
@@ -274,7 +271,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
         if (interchange != k) {
           swap_active_nodes(n, a, lda, k, interchange, perm, work.data(),
                             ldw, panel_width);
-          // 交换改变了第 k 列，必须在新顺序下重新物化。
+          // 交换改变了第 k 列，必须在新顺序下重新更新。
           materialize_current_column(n, a, lda, panel_begin, panel_width,
                                      work.data(), ldw, k, column0.data());
         }
@@ -284,7 +281,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
         piv_size[k] = 1;
 
         // 对 1x1 块，L(:,k)=B(:,k)/d，而 W(:,local)=L(:,k)*d=B(:,k)。
-        // 因此 W 可以直接保存物化列除法前的值。
+        // 因此 W 可以直接保存更新列除法前的值。
         work[k + panel_width * ldw] = d;
         for (int row = k + 1; row < n; ++row) {
           const double b = column0[static_cast<std::size_t>(row)];
@@ -301,7 +298,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
       swap_active_nodes(n, a, lda, k + 1, interchange, perm, work.data(),
                         ldw, panel_width);
 
-      // 两列都必须在写入 D 和 L 之前物化；提前覆盖其中一列会破坏另一列
+      // 两列都必须在写入 D 和 L 之前更新；提前覆盖其中一列会破坏另一列
       // 仍需使用的面板基准数据。
       materialize_current_column(n, a, lda, panel_begin, panel_width,
                                  work.data(), ldw, k, column0.data());
@@ -342,7 +339,7 @@ void delayed_sytrf_blocked(const int n, double *a, const int lda, int *perm,
         a[row + (k + 1) * lda] =
             (d00_scaled * b1 - d10_scaled * b0) *
             inverse_scaled_determinant;
-        // W=[L0 L1]*D 恰好等于分解前物化出的两列 B。
+        // W=[L0 L1]*D 恰好等于分解前更新出的两列 B。
         work[row + panel_width * ldw] = b0;
         work[row + (panel_width + 1) * ldw] = b1;
       }

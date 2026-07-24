@@ -210,7 +210,7 @@ void print_lapack_result(const Result &result, const int n) {
 int main() {
   constexpr int n = 4096;
   constexpr int lda = n;
-  constexpr int nonzeros = 8;
+  constexpr int nonzeros = 800;
   constexpr std::size_t matrix_elements =
       static_cast<std::size_t>(lda) * static_cast<std::size_t>(n);
 

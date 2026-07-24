@@ -1,10 +1,16 @@
 #pragma once
 
-// delayed_sytrf 的面板化版本。
-//
-// 接口、列主序下三角存储、0-based perm/piv_size 以及 info 的含义均与
-// delayed_sytrf 完全相同。区别在于该版本把多个 1x1/2x2 主元累计为面板，
-// 使用工作矩阵 W=L_panel*D_panel 表示尚未写回的 Schur 补贡献，并在面板
-// 结束时通过 BLAS-3 一次性更新尾部下三角矩阵。
-void delayed_sytrf_blocked(int n, double *a, int lda, int *perm,
-                           int *piv_size, int &info);
+/**
+ @brief 采用Bunch-Kaufman的选主元方法对未知格式的对称稠密矩阵进行 LDL^T 分解，并采取延迟主元策略将待延迟的主元延迟到右下角。
+  @param n 矩阵的(行)列数。
+  @param a 矩阵的指针。
+  @param lda 矩阵的 leading dimension。
+  @param perm 矩阵的行列交换记录。
+  @param piv_size 记录分解的主元情况，值为1时代表当前位置为1x1主元，值为2时则代表2x2主元。
+  @param info 输出参数，表示分解的状态。若 info = k，则表示从第 k 个主元开始无法继续分解，后续主元被延迟。
+ @return 
+  @note 输入矩阵a是列主序存储的，且在分解过程中会被修改为LDL^T分解的结果，注意到由于对称性的性质，我们只会读取矩阵的下半部分，也只会存放下半部分，因为对角块存在2x2主元，所以会占据部分上三角部分。
+  @note 为获得更好性能我们在这里使用了 CBLAS 库来进行矩阵运算，确保在编译时链接相应的 BLAS 库。
+  @note 参数非法时 void 函数立即返回，并设置 info=-1。 
+ */
+void delayed_sytrf_blocked(int n, double *a, int lda, int *perm, int *piv_size, int &info);
